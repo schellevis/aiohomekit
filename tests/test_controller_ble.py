@@ -183,6 +183,43 @@ async def test_close_clears_client_on_bleak_error(ble_pairing: BlePairing) -> No
     assert ble_pairing.client is None
 
 
+async def test_close_disconnects_client_already_disconnected_by_accessory(
+    ble_pairing: BlePairing,
+) -> None:
+    """disconnect must be called even if the accessory closed the connection.
+
+    bleak only releases its D-Bus connection in disconnect(), so skipping it
+    leaks one system D-Bus connection per session.
+    """
+    client = AsyncMock()
+    client.is_connected = False
+    ble_pairing.client = client
+
+    await ble_pairing.close()
+
+    client.disconnect.assert_awaited_once()
+    assert ble_pairing.client is None
+
+
+async def test_ensure_connected_releases_stale_client(ble_pairing: BlePairing) -> None:
+    """A client disconnected by the accessory is released before reconnecting."""
+    stale_client = AsyncMock()
+    stale_client.is_connected = False
+    new_client = AsyncMock()
+    ble_pairing.client = stale_client
+    ble_pairing.device = generate_ble_device("AA:BB:CC:DD:EE:FF", "Test")
+
+    with patch(
+        "aiohomekit.controller.ble.pairing.establish_connection",
+        return_value=new_client,
+    ):
+        async with ble_pairing._config_lock:
+            assert await ble_pairing._ensure_connected() is True
+
+    stale_client.disconnect.assert_awaited_once()
+    assert ble_pairing.client is new_client
+
+
 async def test_get_characteristics_skips_missing_value_response(
     ble_pairing: BlePairing,
 ) -> None:

@@ -479,6 +479,10 @@ class BlePairing(AbstractPairing):
                 self.description = discovery.description
             elif not self.device:
                 raise AccessoryNotFoundError(f"{self.name}: Could not find {self.id}")
+            if self.client:
+                # The previous client was disconnected by the accessory;
+                # release its D-Bus connection before replacing it.
+                await self._async_release_stale_client()
             self.client = await establish_connection(
                 self.device,
                 self.name,
@@ -488,6 +492,19 @@ class BlePairing(AbstractPairing):
                 max_attempts=attempts,
             )
             return True
+
+    async def _async_release_stale_client(self) -> None:
+        """Release the resources held by a client that is no longer connected."""
+        client = self.client
+        self.client = None
+        try:
+            await client.disconnect()
+        except BLEAK_EXCEPTIONS:
+            logger.debug(
+                "%s: Failed to release stale connection; rssi=%s",
+                self.name,
+                self.rssi,
+            )
 
     async def _async_start_notify(self, iid: int) -> None:
         assert self._operation_lock.locked(), "_operation_lock should be locked"
@@ -900,8 +917,12 @@ class BlePairing(AbstractPairing):
             await self._close_while_locked()
 
     async def _close_while_locked(self) -> None:
-        if not self.client or not self.client.is_connected:
+        if not self.client:
             return
+        # Always call disconnect, even if the accessory already closed the
+        # connection: bleak only releases the underlying D-Bus connection in
+        # disconnect(), so skipping it when is_connected is False leaks one
+        # system D-Bus connection per session.
         try:
             await self.client.disconnect()
         except BLEAK_EXCEPTIONS:
