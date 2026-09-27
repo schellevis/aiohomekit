@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
-from bleak.exc import BleakError
+from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS as BLEAK_EXCEPTIONS
 from bleak_retry_connector import retry_bluetooth_connection_error
 
 from aiohomekit.controller.abstract import AbstractDiscovery, FinishPairing
@@ -92,6 +92,10 @@ class BleDiscovery(AbstractDiscovery):
             # Check again while holding the lock
             if self.client and self.client.is_connected:
                 return
+            if self.client:
+                # The previous client was disconnected by the accessory;
+                # release its D-Bus connection before replacing it.
+                await self._close_while_locked()
             self.client = await establish_connection(
                 self.device,
                 self.name,
@@ -107,18 +111,24 @@ class BleDiscovery(AbstractDiscovery):
         if not self.client:
             return
         async with self._connection_lock:
-            if not self.client or not self.client.is_connected:
-                return
-            logger.debug("%s: Disconnecting: %s", self.name, self.rssi)
-            try:
-                await self.client.disconnect()
-            except BleakError:
-                logger.debug(
-                    "%s: Failed to close connection, client may have already closed it",
-                    self.name,
-                )
-            finally:
-                self.client = None
+            await self._close_while_locked()
+
+    async def _close_while_locked(self) -> None:
+        if not self.client:
+            return
+        # Always call disconnect, even if the accessory already closed the
+        # connection: bleak only releases the underlying D-Bus connection in
+        # disconnect().
+        logger.debug("%s: Disconnecting: %s", self.name, self.rssi)
+        try:
+            await self.client.disconnect()
+        except BLEAK_EXCEPTIONS:
+            logger.debug(
+                "%s: Failed to close connection, client may have already closed it",
+                self.name,
+            )
+        finally:
+            self.client = None
 
     async def _async_start_pairing(self, alias: str) -> tuple[bytearray, bytearray]:
         await self._ensure_connected()
